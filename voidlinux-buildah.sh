@@ -42,28 +42,30 @@ cleanup()
 
 trap cleanup EXIT
 set -ex
+
 REPO="https://alpha.de.repo.voidlinux.org"
 XBPS_ARCH="x86_64"
-[ $BUILD == "musl" ] && CURRENT="${REPO}/current/musl" || CURRENT="${REPO}/current"
-
-ctr=$(buildah from --name "voidlinux-build" alpine)
+#[ $BUILD == "musl" ] && CURRENT="${REPO}/current/musl" # || CURRENT="${REPO}/current"
+CURRENT="${REPO}/current/musl"
+ctr=$( buildah from --name "voidlinux-build" alpine )
+ctr_mount=$( buildah mount $ctr )
 
 buildah run $ctr -- apk add wget ca-certificates bash 
 
+wget -q -O- "${REPO}/static/xbps-static-latest.${XBPS_ARCH}-musl.tar.xz" | tar xJ -C $ctr_mount
+
 buildah run $ctr -- bash -e <<- EOF
-    wget -q -O- "${REPO}/static/xbps-static-latest.${XBPS_ARCH}-musl.tar.xz" | tar xfJ -
     mkdir -p void/var/db/xbps
     cp -r /var/db/xbps/keys/ void/var/db/xbps/
 
-
     xbps-install -Sy  -R ${CURRENT} -r void base-files xbps busybox-huge
 
-    busybox=$(chroot void busybox | tail -n+$(expr 1 + $(chroot void busybox | grep -n "^Currently" | cut -d: -f1)) | sed "s/,//g" | xargs echo)
-    for n in $busybox; do 
-        ln -s /usr/bin/busybox void/usr/bin/$n 
+    for i in \$(chroot void busybox | tail -n+\$(expr 1 + \$(chroot void busybox | grep -n "^Currently" | cut -d: -f1)) | sed "s/,//g" | xargs echo)
+    do
+	    ln -svf /usr/bin/busybox void/usr/bin/\$i
     done
 
-    mkdir void/etc/ssl/certs && chroot void update-ca-certificates --fresh
+   # mkdir void/etc/ssl/certs && chroot void update-ca-certificates --fresh
     chroot void xbps-reconfigure -a
 
     chroot void sh -c 'xbps-rindex -c /var/db/xbps/htt*'
