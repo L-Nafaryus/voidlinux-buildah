@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-BUILD=glibc
+BUILD=musl
 TYPE=standart
 
 while [[ $# -gt 0 ]]; do
@@ -36,53 +36,80 @@ done
 
 cleanup()
 {
-    ((${#ctr})) && buildah rm $ctr
+    ((${#alpine})) && buildah rm $alpine
     ((${#voidlinux})) && buildah rm $voidlinux
 }
 
 trap cleanup EXIT
 set -ex
 
+#AUTHOR=""
 REPO="https://alpha.de.repo.voidlinux.org"
 XBPS_ARCH="x86_64"
-#[ $BUILD == "musl" ] && CURRENT="${REPO}/current/musl" # || CURRENT="${REPO}/current"
 CURRENT="${REPO}/current/musl"
-ctr=$( buildah from --name "voidlinux-build" alpine )
-ctr_mount=$( buildah mount $ctr )
+NAME="voidlinux-$BUILD"
+TAG="latest"
 
-buildah run $ctr -- apk add wget ca-certificates bash 
+[ $TYPE != "standart" ] && NAME="$NAME-$TYPE"
 
-wget -q -O- "${REPO}/static/xbps-static-latest.${XBPS_ARCH}-musl.tar.xz" | tar xJ -C $ctr_mount
+TARGET="/void"
 
-buildah run $ctr -- bash -e <<- EOF
-    mkdir -p void/var/db/xbps
-    cp -r /var/db/xbps/keys/ void/var/db/xbps/
+###
+#   alpine
+##
+alpine=$( buildah from --name "voidlinux-build" alpine )
+alpine_mount=$( buildah mount $alpine )
 
-    xbps-install -Sy  -R ${CURRENT} -r void base-files xbps busybox-huge
+buildah run $alpine -- apk add wget ca-certificates bash 
 
-    for i in \$(chroot void busybox | tail -n+\$(expr 1 + \$(chroot void busybox | grep -n "^Currently" | cut -d: -f1)) | sed "s/,//g" | xargs echo)
+wget -q -O- "${REPO}/static/xbps-static-latest.${XBPS_ARCH}-musl.tar.xz" | tar xJ -C $alpine_mount
+
+buildah run $alpine -- bash -e <<- EOF
+    mkdir -p $TARGET/var/db/xbps
+    cp -r /var/db/xbps/keys/ $TARGET/var/db/xbps/
+
+    xbps-install -Sy  -R ${CURRENT} -r $TARGET base-files xbps busybox-huge ca-certificates bash
+
+    for i in \$(chroot $TARGET busybox | tail -n+\$(expr 1 + \$(chroot void busybox | grep -n "^Currently" | cut -d: -f1)) | sed "s/,//g" | xargs echo)
     do
-	    ln -svf /usr/bin/busybox void/usr/bin/\$i
+	    ln -svf /usr/bin/busybox $TARGET/usr/bin/\$i
     done
 
-   # mkdir void/etc/ssl/certs && chroot void update-ca-certificates --fresh
-    chroot void xbps-reconfigure -a
+    mkdir $TARGET/etc/ssl/certs && chroot $TARGET update-ca-certificates --fresh
+    chroot $TARGET xbps-reconfigure -a
 
-    chroot void sh -c 'xbps-rindex -c /var/db/xbps/htt*'
-    rm -rf void/var/cache/xbps void/usr/share/man/*
+    chroot $TARGET sh -c 'xbps-rindex -c /var/db/xbps/htt*'
 EOF
-#buildah commit $ctr voidlinux-build
 
-voidlinux=$(buildah from --name "voidlinux" scratch)
+###
+#   voidlinux
+##
+voidlinux=$( buildah from --name "voidlinux" scratch )
+voidlinux_mount=$( buildah mount $voidlinux )
 
 buildah config --env XBPS_ARCH=$XBPS_ARCH $voidlinux
-buildah copy --from $ctr $voidlinux /void /
+buildah config --cmd /bin/sh $voidlinux
+buildah config --label name="$NAME" $voidlinux
+
+buildah copy $voidlinux "$alpine_mount$TARGET" /
 
 [ $TYPE == "minimal" ] && buildah run $voidlinux -- xbps-install -Sy base-minimal
 
-buildah config --cmd /bin/sh $voidlinux
-buildah --label Name="voidlinux-$TYPE:$BUILD" $voidlinux
+[ $BUILD == "glibc" ] && buildah run $voidlinux -- bash -e <<- EOF
+    xbps-install -Sy glibc-locales
+    sed -i 's/^#en_US/en_US/' /target/etc/default/libc-locales
+    xbps-reconfigure -a
+EOF
 
-buildah commit $voidlinux
+buildah run $voidlinux -- bash -e <<- EOF
+    xbps-remove -y bash
 
-buildah rm $ctr
+    rm -rf /var/cache/xbps 
+    rm -rf /usr/share/man/*
+    rm -rf /usr/lib/gconv/[BCDEFGHIJKLMNOPQRSTVZYZ]*
+    rm -rf /usr/lib/gconv/lib*
+EOF
+
+buildah commit --squash $voidlinux "$NAME:$TAG"
+
+buildah unmount $alpine_mount
