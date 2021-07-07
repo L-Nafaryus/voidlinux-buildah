@@ -1,38 +1,60 @@
 #!/usr/bin/env bash
 
-BUILD=musl
-TYPE=standart
+_help()
+{
+    cat <<- EOF
+Usage:
+    $(basename "$0") [options ...]
+    
+Options:
+    --musl|--glibc          Set a libc implementation (default: --musl).
+    --standart|--minimal    Set a type which determines additional packages (default: --standart).
+EOF
+}
 
-while [[ $# -gt 0 ]]; do
-    key="$1"
+_parseargs()
+{
+    while [[ $# -gt 0 ]]; do
+        key="$1"
 
-    case $key in
-        --musl)
-            BUILD=musl
-            shift
-            ;;
+        case $key in
+            --musl)
+                BUILD=musl
+                shift
+                ;;
 
-        --glibc)
-            BUILD=glibc
-            shift
-            ;;
+            --glibc)
+                BUILD=glibc
+                shift
+                ;;
 
-        --standart)
-            TYPE=standart
-            shift
-            ;;
+            --standart)
+                TYPE=standart
+                shift
+                ;;
 
-        --minimal)
-            TYPE=minimal
-            shift
-            ;;
+            --minimal)
+                TYPE=minimal
+                shift
+                ;;
 
-        -h|--help)
-            _help
-            exit 0
-            ;;
-    esac
-done
+            --debug)
+                DEBUG=true
+                shift
+                ;;
+
+            -h|--help)
+                _help
+                exit 0
+                ;;
+
+            *)
+                _help
+                exit 1
+                ;;
+        esac
+    done
+}
 
 cleanup()
 {
@@ -40,16 +62,27 @@ cleanup()
     ((${#voidlinux})) && buildah rm $voidlinux
 }
 
-trap cleanup EXIT
-set -ex
+###
+#   Main entry
+##
+trap cleanup INT TERM EXIT
+
+BUILD=musl
+TYPE=standart
+
+_parseargs "$@"
+
+((${#DEBUG})) && set -x 
 
 #AUTHOR=""
 REPO="https://alpha.de.repo.voidlinux.org"
-XBPS_ARCH="x86_64"
+ARCH="x86_64"
+XBPS_ARCH="x86_64-musl"
 CURRENT="${REPO}/current/musl"
 NAME="voidlinux-$BUILD"
 TAG="latest"
 
+[ $BUILD == "glibc" ] && XBPS_ARCH="x86_64" && CURRENT="$REPO/current"
 [ $TYPE != "standart" ] && NAME="$NAME-$TYPE"
 
 TARGET="/void"
@@ -62,9 +95,11 @@ alpine_mount=$( buildah mount $alpine )
 
 buildah run $alpine -- apk add wget ca-certificates bash 
 
-wget -q -O- "${REPO}/static/xbps-static-latest.${XBPS_ARCH}-musl.tar.xz" | tar xJ -C $alpine_mount
+wget -q -O- "${REPO}/static/xbps-static-latest.${ARCH}-musl.tar.xz" | tar xJ -C $alpine_mount
 
 buildah run $alpine -- bash -e <<- EOF
+    export XBPS_ARCH=${XBPS_ARCH}
+
     mkdir -p $TARGET/var/db/xbps
     cp -r /var/db/xbps/keys/ $TARGET/var/db/xbps/
 
@@ -72,7 +107,7 @@ buildah run $alpine -- bash -e <<- EOF
 
     for i in \$(chroot $TARGET busybox | tail -n+\$(expr 1 + \$(chroot void busybox | grep -n "^Currently" | cut -d: -f1)) | sed "s/,//g" | xargs echo)
     do
-	    ln -svf /usr/bin/busybox $TARGET/usr/bin/\$i
+	    ln -sf /usr/bin/busybox $TARGET/usr/bin/\$i
     done
 
     mkdir $TARGET/etc/ssl/certs && chroot $TARGET update-ca-certificates --fresh
@@ -97,7 +132,7 @@ buildah copy $voidlinux "$alpine_mount$TARGET" /
 
 [ $BUILD == "glibc" ] && buildah run $voidlinux -- bash -e <<- EOF
     xbps-install -Sy glibc-locales
-    sed -i 's/^#en_US/en_US/' /target/etc/default/libc-locales
+    sed -i 's/^#en_US/en_US/' /etc/default/libc-locales
     xbps-reconfigure -a
 EOF
 
@@ -112,4 +147,3 @@ EOF
 
 buildah commit --squash $voidlinux "$NAME:$TAG"
 
-buildah unmount $alpine_mount
